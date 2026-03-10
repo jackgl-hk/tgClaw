@@ -22,6 +22,8 @@ class Task:
     phase: str | None = None
     plan: list[str] | None = None
     attempts: int = 0
+    current_step: int = 0
+    total_steps: int = 0
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -39,6 +41,8 @@ class Task:
             "phase": self.phase,
             "plan": self.plan,
             "attempts": self.attempts,
+            "current_step": self.current_step,
+            "total_steps": self.total_steps,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -58,6 +62,8 @@ class Task:
             phase=data.get("phase"),
             plan=data.get("plan"),
             attempts=int(data.get("attempts", 0)),
+            current_step=int(data.get("current_step", 0)),
+            total_steps=int(data.get("total_steps", 0)),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
@@ -105,6 +111,8 @@ class TaskStore:
             phase="queued",
             plan=[],
             attempts=0,
+            current_step=0,
+            total_steps=0,
             created_at=_now(),
             updated_at=_now(),
         )

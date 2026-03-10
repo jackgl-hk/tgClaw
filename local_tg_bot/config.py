@@ -100,6 +100,8 @@ class Settings:
     auto_verify: bool = os.getenv("AUTO_VERIFY", "1") == "1"
     auto_verify_timeout_sec: int = _get_int("AUTO_VERIFY_TIMEOUT_SEC", 300)
     auto_plan: bool = os.getenv("AUTO_PLAN", "1") == "1"
+    auto_subtasks: bool = os.getenv("AUTO_SUBTASKS", "1") == "1"
+    auto_progress_updates: bool = os.getenv("AUTO_PROGRESS_UPDATES", "1") == "1"
     auto_retry_attempts: int = _get_int("AUTO_RETRY_ATTEMPTS", 1)
     auto_retry_on_failure: bool = os.getenv("AUTO_RETRY_ON_FAILURE", "1") == "1"
 

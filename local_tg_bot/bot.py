@@ -549,6 +549,7 @@ def _plan_task(
     if plan:
         task.plan = plan
         task.phase = "planned"
+        task.total_steps = len(plan)
         store.update_task(task)
     return plan
 
@@ -557,9 +558,20 @@ def _phase_text(task) -> str:
     parts = [f"{task.task_id}: {task.status}"]
     if task.phase:
         parts.append(f"phase={task.phase}")
+    if task.total_steps:
+        parts.append(f"step={task.current_step}/{task.total_steps}")
     if task.attempts:
         parts.append(f"attempts={task.attempts}")
     return " | ".join(parts)
+
+
+def _should_subtask_execute(task, workdir: str) -> bool:
+    return bool(
+        settings.auto_subtasks
+        and task.plan
+        and len(task.plan) >= 2
+        and _is_code_task(task.text, workdir)
+    )
 
 
 def _send_message(chat_id: int, text: str) -> None:
@@ -1260,6 +1272,8 @@ class TaskWatchdog:
 
 
 def _send_phase_update(chat_id: int, task, include_plan: bool = False) -> None:
+    if not settings.auto_progress_updates:
+        return
     lines = [_phase_text(task)]
     if include_plan and task.plan:
         lines.append("Plan:")
@@ -1274,6 +1288,19 @@ def _append_log_block(log_path: Path, title: str, text: str) -> None:
             log_file.write(text.rstrip() + "\n")
     except Exception as exc:
         _log(f"failed to write {title} block for {log_path.name}: {exc!r}")
+
+
+def _build_retry_context(log_path: Path, error: str | None) -> str:
+    retry_context = [
+        "Retry instruction:",
+        "- The previous attempt failed. Inspect the failure, fix the root cause, and retry end-to-end.",
+    ]
+    if error:
+        retry_context.append("Previous error:\n" + error)
+    tail = _tail_log(log_path, 80)
+    if tail:
+        retry_context.append("Recent log tail:\n" + tail)
+    return "\n".join(retry_context)
 
 
 def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) -> None:
@@ -1374,52 +1401,85 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
     attempts_allowed = 1 + max(0, settings.auto_retry_attempts if settings.auto_retry_on_failure else 0)
     output = None
     error = None
-    for attempt in range(1, attempts_allowed + 1):
-        task.attempts = attempt
-        task.phase = "executing" if attempt == 1 else "retrying"
+    completed_steps: list[str] = []
+    steps = task.plan[:] if _should_subtask_execute(task, task.workdir) else []
+    total_steps = len(steps)
+
+    def _execute_prompt(prompt_sections: list[str], phase: str) -> tuple[str | None, str | None]:
+        local_output = None
+        local_error = None
+        for attempt in range(1, attempts_allowed + 1):
+            task.attempts = attempt
+            task.phase = phase if attempt == 1 else f"retrying_{phase}"
+            store.update_task(task)
+            if attempt == 1 or attempt > 1:
+                _send_phase_update(chat_id, task, include_plan=False)
+            local_sections = list(prompt_sections)
+            if attempt > 1:
+                local_sections.append(_build_retry_context(log_path, local_error))
+            task_prompt = "\n\n".join(local_sections)
+            local_output, local_error = run_codex(
+                settings,
+                task_prompt,
+                task.workdir,
+                log_path=log_path,
+                needs_flutter=needs_flutter,
+                on_pid=_set_pid,
+                provider=provider,
+            )
+            if not local_error:
+                break
+            if _needs_codex_approval(local_error):
+                task.status = "needs_approval"
+                task.phase = "awaiting_approval"
+                task.error = local_error
+                store.update_task(task)
+                _send_message(
+                    chat_id,
+                    f"Codex approval required for task {task.task_id}. Reply /approve {task.task_id} or /reject {task.task_id}",
+                )
+                return None, local_error
+            if attempt < attempts_allowed:
+                _append_log_block(log_path, f"retry-{phase}-{attempt}", local_error)
+        return local_output, local_error
+
+    if steps:
+        task.total_steps = total_steps
         store.update_task(task)
-        if attempt > 1:
-            _send_phase_update(chat_id, task, include_plan=False)
+        step_outputs: list[str] = []
+        for idx, step in enumerate(steps, start=1):
+            task.current_step = idx
+            step_sections = list(sections)
+            step_sections.append("Execution plan:\n" + "\n".join(f"{i+1}. {item}" for i, item in enumerate(steps)))
+            if completed_steps:
+                step_sections.append(
+                    "Completed steps:\n" + "\n".join(f"- {item}" for item in completed_steps)
+                )
+            step_sections.append(
+                "Current step:\n"
+                f"- Execute only step {idx} of {total_steps}: {step}\n"
+                "- Make the necessary changes for this step and briefly summarize the concrete work completed."
+            )
+            step_sections.append(f"Overall user request:\n{task.text}")
+            output, error = _execute_prompt(step_sections, f"step_{idx}")
+            if error:
+                break
+            completed_steps.append(step)
+            if output:
+                step_outputs.append(f"Step {idx}: {step}\n{output.strip()}")
+        if not error:
+            output = "\n\n".join(step_outputs).strip()
+    else:
         attempt_sections = list(sections)
         if task.plan:
             attempt_sections.append("Execution plan:\n" + "\n".join(f"{i+1}. {item}" for i, item in enumerate(task.plan)))
-        if attempt > 1:
-            retry_context = [
-                "Retry instruction:",
-                "- The previous attempt failed. Inspect the failure, fix the root cause, and retry end-to-end.",
-            ]
-            if error:
-                retry_context.append("Previous error:\n" + error)
-            tail = _tail_log(log_path, 80)
-            if tail:
-                retry_context.append("Recent log tail:\n" + tail)
-            attempt_sections.append("\n".join(retry_context))
         attempt_sections.append(f"User request:\n{task.text}")
-        task_prompt = "\n\n".join(attempt_sections)
-        output, error = run_codex(
-            settings,
-            task_prompt,
-            task.workdir,
-            log_path=log_path,
-            needs_flutter=needs_flutter,
-            on_pid=_set_pid,
-            provider=provider,
-        )
-        if not error:
-            break
-        if _needs_codex_approval(error):
-            task.status = "needs_approval"
-            task.phase = "awaiting_approval"
-            task.error = error
-            store.update_task(task)
-            _send_message(
-                chat_id,
-                f"Codex approval required for task {task.task_id}. Reply /approve {task.task_id} or /reject {task.task_id}",
-            )
-            return
-        if attempt < attempts_allowed:
-            _append_log_block(log_path, f"retry-{attempt}", error)
-            continue
+        output, error = _execute_prompt(attempt_sections, "executing")
+
+    latest = store.get_task(task.task_id)
+    if latest and latest.status == "needs_approval":
+        return
+
     if error:
         task.status = "failed"
         task.phase = "failed"
