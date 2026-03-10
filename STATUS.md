@@ -1,0 +1,29 @@
+# Status
+
+- Initialized local Telegram bot scaffold for Codex control.
+- Updated automation guidance to reduce interactive approvals.
+- Launchd service configured and running (logs in ~/Library/Logs/local-tg.*).
+- Added Bun PATH fallback for Codex and updated launchd PATH env.
+- Added Homebrew node discovery to avoid `env: node` failures for Codex CLI.
+- Added pseudo-TTY retry for Codex CLI when stdin is not a terminal.
+- Added /selfcheck command and automatic diagnostics on task failure.
+- Added Codex approval prompt detection and TG approval flow.
+- Added Telegram proxy support and error logging for Telegram API failures.
+- Added async task queue so the bot stays responsive while Codex runs.
+- Defaulted Codex execution to `codex exec` non-interactive mode.
+- Added configurable Codex worker pool for parallel execution.
+- Added optional caffeinate mode to keep the Mac awake.
+- Added curl fallback for Telegram API calls on proxy failures.
+- Added optional force-curl mode for Telegram calls.
+- Added watchdog to fail stale running tasks automatically.
+- Allowed disabling timeouts by setting CODEX_TIMEOUT_SEC=0 and TASK_STALE_SEC=0.
+- Added per-task log files and `/log` command for tail output.
+- Added project detection and project index injection in prompts.
+- Added per-project memory capture and /switch, /leave commands.
+- Added /tasks for queue stats and per-project recent tasks.
+- Added /current for current project/workdir and last task id.
+- Added Flutter availability note in prompt context.
+- Added project Markdown auto-loading into prompts.
+- Added Flutter SDK auto-allowing in Codex sandbox when Flutter tasks are detected.
+- Expanded help and documented common Flutter commands.
+- Added /cancel command and PID tracking for running tasks.

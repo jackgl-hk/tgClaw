@@ -1,0 +1,10 @@
+.env
+.env.*
+._*
+.venv
+.venv_sys
+__pycache__
+*.pyc
+logs/
+data/
+memories/

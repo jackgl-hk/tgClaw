@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.localtg.bot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/PATH/TO/local-tg/.venv_sys/bin/python</string>
+    <string>-m</string>
+    <string>local_tg_bot.run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/PATH/TO/local-tg</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/PATH/TO/USERHOME/Library/Logs/local-tg.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/PATH/TO/USERHOME/Library/Logs/local-tg.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key>
+    <string>/PATH/TO/local-tg</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>/PATH/TO/USERHOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
