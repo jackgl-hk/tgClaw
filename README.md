@@ -23,6 +23,8 @@ Key behaviors:
 - Planned tasks can be executed step-by-step. Each step is run as its own focused subtask with filesystem state carried across through the repo itself.
 - The bot can send intermediate progress updates such as planning, step `1/4`, retrying step `2/4`, and verifying.
 - If execution fails, the bot can do one automatic repair retry with the previous error and log tail as context.
+- The bot keeps a per-project session archive in `data/sessions/` so the next task can reuse the last plan and result summary.
+- After task completion, it can update the target project's `STATUS.md` automatically with the latest task, summary, plan, and verification result.
 - Use `/cancel <id>` to stop a running task.
 - The bot auto-loads key Markdown files from the project folder into the prompt (includes `service/README.md` and `docs/DEPLOYMENT*.md` when present).
 - If a task mentions Flutter, the bot automatically adds the Flutter SDK directory to the Codex sandbox (override with `FLUTTER_SDK_PATH`).
@@ -41,6 +43,7 @@ How it works:
 - Successful code tasks include an automatic verification summary in the reply and the task log.
 - `/status` and `/tasks` include task phase and attempt count so you can see whether a task is planning, executing, retrying, or verifying.
 - `AUTO_SUBTASKS`, `AUTO_PROGRESS_UPDATES`, `AUTO_PLAN`, and `AUTO_RETRY_*` control the richer agent workflow.
+- `PROJECT_SESSION_DIR`, `AUTO_UPDATE_STATUS_DOCS`, and `AUTO_STATUS_MAX_ENTRIES` control session archives and auto-written status docs.
 
 Entry / wake-up:
 - The entry point is the Telegram chat itself.

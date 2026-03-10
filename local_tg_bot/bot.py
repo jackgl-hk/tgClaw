@@ -303,6 +303,14 @@ def _memory_dir() -> Path:
     return base
 
 
+def _session_dir() -> Path:
+    base = Path(settings.project_session_dir)
+    if not base.is_absolute():
+        base = Path(settings.task_store_path).parent / base
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
 def _memory_path(project: str, chat_id: int) -> Path:
     safe = _normalize_text(project) or project.replace(" ", "_")
     base = _memory_dir() / safe
@@ -327,6 +335,161 @@ def _append_memory(chat_id: int, task, outcome: str, detail: str) -> None:
         _log(f"memory append failed for {project}: {exc!r}")
         return
     _trim_memory(path, settings.project_memory_max_lines)
+
+
+def _session_path(project: str, chat_id: int) -> Path:
+    safe = _normalize_text(project) or project.replace(" ", "_")
+    base = _session_dir() / safe
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"chat_{chat_id}.json"
+
+
+def _status_doc_path(workdir: str) -> Path:
+    base = Path(workdir)
+    for name in ("STATUS.md", "status.md"):
+        path = base / name
+        if path.exists():
+            return path
+    return base / "STATUS.md"
+
+
+def _safe_summary(text: str, limit: int = 800) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    return cleaned[:limit].rstrip()
+
+
+def _update_session_archive(chat_id: int, task, summary: str) -> None:
+    project = _project_name_for_path(task.workdir)
+    path = _session_path(project, chat_id)
+    payload = {
+        "project": project,
+        "workdir": task.workdir,
+        "chat_id": chat_id,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "current_task_id": task.task_id,
+        "last_status": task.status,
+        "last_phase": task.phase,
+        "recent_plan": task.plan or [],
+        "recent_summary": _safe_summary(summary, 1200),
+        "recent_tasks": [],
+    }
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        payload.update(
+            {
+                "project": project,
+                "workdir": task.workdir,
+                "chat_id": chat_id,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "current_task_id": task.task_id,
+                "last_status": task.status,
+                "last_phase": task.phase,
+                "recent_plan": task.plan or [],
+                "recent_summary": _safe_summary(summary, 1200),
+            }
+        )
+    recent = payload.get("recent_tasks")
+    if not isinstance(recent, list):
+        recent = []
+    recent.insert(
+        0,
+        {
+            "task_id": task.task_id,
+            "status": task.status,
+            "phase": task.phase,
+            "attempts": task.attempts,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "request": _safe_summary(task.text, 400),
+            "summary": _safe_summary(summary, 800),
+            "plan": task.plan or [],
+        },
+    )
+    payload["recent_tasks"] = recent[:10]
+    try:
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as exc:
+        _log(f"failed to update session archive for {project}: {exc!r}")
+
+
+def _session_context(project: str, chat_id: int) -> str:
+    path = _session_path(project, chat_id)
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    lines = []
+    summary = payload.get("recent_summary")
+    if isinstance(summary, str) and summary.strip():
+        lines.append("Last session summary: " + summary.strip())
+    plan = payload.get("recent_plan")
+    if isinstance(plan, list) and plan:
+        lines.append("Last session plan:")
+        lines.extend(f"- {str(item).strip()}" for item in plan[:6] if str(item).strip())
+    recent = payload.get("recent_tasks")
+    if isinstance(recent, list) and recent:
+        lines.append("Session archive:")
+        for item in recent[:3]:
+            if not isinstance(item, dict):
+                continue
+            tid = item.get("task_id", "")
+            status = item.get("status", "")
+            request = str(item.get("request", "")).strip()
+            if tid or request:
+                lines.append(f"- {tid} [{status}] {request}".strip())
+    if not lines:
+        return ""
+    return "Project session archive:\n" + "\n".join(lines)
+
+
+def _update_status_doc(task, summary: str, verification: str | None = None) -> None:
+    if not settings.auto_update_status_docs:
+        return
+    path = _status_doc_path(task.workdir)
+    title = f"# Status\n\n"
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    current = (
+        "## Current\n\n"
+        f"- Project: `{_project_name_for_path(task.workdir)}`\n"
+        f"- Last task: `{task.task_id}`\n"
+        f"- Status: `{task.status}`\n"
+        f"- Phase: `{task.phase or 'n/a'}`\n"
+        f"- Updated: {now}\n"
+    )
+    if task.plan:
+        current += "\n### Last Plan\n\n" + "\n".join(f"- {item}" for item in task.plan[:6]) + "\n"
+    history_entry = [
+        f"### {task.task_id} - {now}",
+        f"- Request: {_safe_summary(task.text, 300)}",
+        f"- Result: {_safe_summary(summary, 500) or '(no summary)'}",
+    ]
+    if verification:
+        history_entry.append(f"- Verification: {_safe_summary(verification, 400)}")
+    history_block = "\n".join(history_entry)
+
+    old_text = ""
+    if path.exists():
+        old_text = _read_text_file(path)
+    old_history = ""
+    marker = "## History"
+    if marker in old_text:
+        old_history = old_text.split(marker, 1)[1].strip()
+    entries: list[str] = []
+    if old_history:
+        parts = [part.strip() for part in old_history.split("\n### ") if part.strip()]
+        for idx, part in enumerate(parts):
+            entries.append(("### " + part) if idx > 0 else (part if part.startswith("### ") else "### " + part))
+    entries.insert(0, history_block)
+    entries = entries[: settings.auto_status_max_entries]
+    final = title + current + "\n## History\n\n" + "\n\n".join(entries).strip() + "\n"
+    try:
+        path.write_text(final, encoding="utf-8")
+    except Exception as exc:
+        _log(f"failed to update status doc {path}: {exc!r}")
 
 
 def _trim_memory(path: Path, max_lines: int) -> None:
@@ -1334,6 +1497,7 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
     git_ctx = _git_context(task.workdir)
     project_name = _project_name_for_path(task.workdir)
     memory = _memory_context(project_name, chat_id, settings.project_memory_context_lines)
+    session = _session_context(project_name, chat_id)
     recent_tasks = _recent_task_context(store, chat_id, task.workdir)
     text_lower = (task.text or "").lower()
     wants_ios = any(key in text_lower for key in ("ios", "iphone", "ipad", "simulator", "模拟器", "苹果"))
@@ -1352,6 +1516,8 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
         sections.append(git_ctx)
     if memory:
         sections.append(memory)
+    if session:
+        sections.append(session)
     if recent_tasks:
         sections.append(recent_tasks)
     if needs_flutter:
@@ -1486,6 +1652,8 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
         task.error = error
         store.update_task(task)
         _append_memory(chat_id, task, "failed", error)
+        _update_session_archive(chat_id, task, error)
+        _update_status_doc(task, error)
         diag = diagnose_codex(settings)
         _send_message(chat_id, f"Task failed: {error}\n\nDiagnostics:\n{diag}")
         return
@@ -1498,6 +1666,8 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
         task.output = (output or "") + "\n\nDiagnostics:\n" + diag
         store.update_task(task)
         _append_memory(chat_id, task, "failed", task.output or "")
+        _update_session_archive(chat_id, task, task.output or "")
+        _update_status_doc(task, task.output or "")
         _append_log_block(log_path, "diagnostics", task.output or "")
         _send_message(chat_id, task.output)
         return
@@ -1514,6 +1684,8 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
     task.output = final_output
     store.update_task(task)
     _append_memory(chat_id, task, task.status, task.output or "")
+    _update_session_archive(chat_id, task, final_output)
+    _update_status_doc(task, final_output, verify_summary)
     _send_message(chat_id, task.output)
 
 

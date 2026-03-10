@@ -88,6 +88,7 @@ class Settings:
     )
     project_root: str = _derive_project_root()
     project_memory_dir: str = os.getenv("PROJECT_MEMORY_DIR", "data/memory")
+    project_session_dir: str = os.getenv("PROJECT_SESSION_DIR", "data/sessions")
     project_memory_max_lines: int = _get_int("PROJECT_MEMORY_MAX_LINES", 600)
     project_memory_context_lines: int = _get_int("PROJECT_MEMORY_CONTEXT_LINES", 80)
     project_context_files: str = os.getenv(
@@ -104,6 +105,8 @@ class Settings:
     auto_progress_updates: bool = os.getenv("AUTO_PROGRESS_UPDATES", "1") == "1"
     auto_retry_attempts: int = _get_int("AUTO_RETRY_ATTEMPTS", 1)
     auto_retry_on_failure: bool = os.getenv("AUTO_RETRY_ON_FAILURE", "1") == "1"
+    auto_update_status_docs: bool = os.getenv("AUTO_UPDATE_STATUS_DOCS", "1") == "1"
+    auto_status_max_entries: int = _get_int("AUTO_STATUS_MAX_ENTRIES", 12)
 
     codex_task_command: str | None = os.getenv("CODEX_TASK_COMMAND")
     codex_task_args: str | None = os.getenv("CODEX_TASK_ARGS")
