@@ -381,6 +381,187 @@ def _memory_context(project: str, chat_id: int, max_lines: int) -> str:
     return "Project memory (recent):\n" + "\n".join(tail)
 
 
+def _run_text_command(command: list[str], workdir: str, timeout: int = 8) -> str:
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=workdir,
+            env=_prepare_env(workdir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception:
+        return ""
+    text = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return text
+
+
+def _project_snapshot_context(workdir: str) -> str:
+    base = Path(workdir)
+    entries: list[str] = []
+    try:
+        for entry in sorted(base.iterdir(), key=lambda item: item.name.lower()):
+            name = entry.name
+            if name.startswith(".") and name not in {".github", ".vscode"}:
+                continue
+            if name in {"build", ".dart_tool", "node_modules", ".turbo", ".next"}:
+                continue
+            suffix = "/" if entry.is_dir() else ""
+            entries.append(name + suffix)
+            if len(entries) >= 40:
+                break
+    except Exception:
+        return ""
+
+    markers = []
+    for marker in ("pubspec.yaml", "package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod"):
+        if (base / marker).exists():
+            markers.append(marker)
+
+    lines = []
+    if entries:
+        lines.append("Top-level files:")
+        lines.append(", ".join(entries))
+    if markers:
+        lines.append("Tech markers: " + ", ".join(markers))
+    if not lines:
+        return ""
+    return "Project snapshot:\n" + "\n".join(lines)
+
+
+def _git_context(workdir: str) -> str:
+    branch = _run_text_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], workdir, timeout=5)
+    status = _run_text_command(["git", "status", "--short"], workdir, timeout=6)
+    if not branch and not status:
+        return ""
+    lines = []
+    if branch:
+        lines.append(f"Git branch: {branch.splitlines()[0].strip()}")
+    if status:
+        tail = status.splitlines()[:20]
+        lines.append("Git status:\n" + "\n".join(tail))
+    return "\n".join(lines)
+
+
+def _recent_task_context(store: TaskStore, chat_id: int, workdir: str, limit: int = 3) -> str:
+    project = _project_name_for_path(workdir)
+    tasks = [
+        task
+        for task in reversed(store.list_tasks_for_chat(chat_id))
+        if _task_project_name(task) == project and task.status not in {"queued", "running"}
+    ]
+    chunks: list[str] = []
+    for task in tasks[:limit]:
+        lines = [
+            f"- id: {task.task_id}",
+            f"  status: {task.status}",
+            f"  request: {task.text.strip()}",
+        ]
+        detail = (task.output or task.error or "").strip()
+        if detail:
+            detail = _truncate_text(detail, 600)
+            lines.append("  result: " + detail.replace("\n", " "))
+        chunks.append("\n".join(lines))
+    if not chunks:
+        return ""
+    return "Recent task history:\n" + "\n\n".join(chunks)
+
+
+def _execution_style_context() -> str:
+    return (
+        "Execution style:\n"
+        "- Work like Codex in a local terminal session, not like a generic chatbot.\n"
+        "- First inspect relevant files and current repo state before making changes.\n"
+        "- Prefer concrete action over questions when the request can be reasonably inferred from the current project.\n"
+        "- Keep changes inside the current workdir unless the request clearly targets another allowed project.\n"
+        "- If code changes are needed, implement them, then run the lightest useful verification commands.\n"
+        "- In the final response, summarize what you changed, what you ran, and any remaining blocker or risk.\n"
+        "- Do not ask to copy files or manually inspect obvious things you can inspect yourself.\n"
+    )
+
+
+def _should_auto_plan(text: str, workdir: str) -> bool:
+    if not settings.auto_plan:
+        return False
+    if not _is_code_task(text, workdir):
+        return False
+    lower = (text or "").lower()
+    simple = (
+        "status",
+        "log",
+        "readme",
+        "docs",
+        "summary",
+        "summarize",
+        "analyze only",
+    )
+    return not any(token in lower for token in simple)
+
+
+def _extract_plan_lines(text: str, limit: int = 6) -> list[str]:
+    items: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(("1. ", "2. ", "3. ", "4. ", "5. ", "6. ", "- ", "* ")):
+            line = re.sub(r"^(\d+\.\s+|[-*]\s+)", "", line).strip()
+            if line:
+                items.append(line)
+        elif not items and len(line) <= 120:
+            items.append(line)
+        if len(items) >= limit:
+            break
+    return items[:limit]
+
+
+def _plan_task(
+    task,
+    store: TaskStore,
+    provider: str,
+    needs_flutter: bool,
+    base_sections: list[str],
+    log_path: Path,
+) -> list[str]:
+    plan_prompt = "\n\n".join(
+        base_sections
+        + [
+            "Planning task:\n"
+            "- Produce a short execution plan before coding.\n"
+            "- Use 3 to 6 concise steps.\n"
+            "- Focus on concrete implementation and verification steps.\n"
+            "- Output only the plan as numbered lines.",
+            f"User request:\n{task.text}",
+        ]
+    )
+    plan_output, plan_error = run_codex(
+        settings,
+        plan_prompt,
+        task.workdir,
+        log_path=log_path,
+        needs_flutter=needs_flutter,
+        provider=provider,
+    )
+    if plan_error:
+        return []
+    plan = _extract_plan_lines(plan_output or "")
+    if plan:
+        task.plan = plan
+        task.phase = "planned"
+        store.update_task(task)
+    return plan
+
+
+def _phase_text(task) -> str:
+    parts = [f"{task.task_id}: {task.status}"]
+    if task.phase:
+        parts.append(f"phase={task.phase}")
+    if task.attempts:
+        parts.append(f"attempts={task.attempts}")
+    return " | ".join(parts)
+
+
 def _send_message(chat_id: int, text: str) -> None:
     for chunk in split_text(text, settings.telegram_message_max_chars):
         payload = {"chat_id": chat_id, "text": chunk}
@@ -512,13 +693,17 @@ def _handle_command(
             if not task:
                 _send_message(chat_id, "Task not found.")
                 return True
-            _send_message(chat_id, f"{task.task_id}: {task.status}")
+            lines = [_phase_text(task)]
+            if task.plan:
+                lines.append("Plan:")
+                lines.extend(f"- {item}" for item in task.plan[:6])
+            _send_message(chat_id, "\n".join(lines))
             return True
         tasks = store.list_tasks_for_chat(chat_id)[-5:]
         if not tasks:
             _send_message(chat_id, "No tasks.")
             return True
-        lines = [f"{t.task_id}: {t.status}" for t in tasks]
+        lines = [_phase_text(t) for t in tasks]
         _send_message(chat_id, "\n".join(lines))
         return True
     if text.startswith("/tasks"):
@@ -551,7 +736,9 @@ def _handle_command(
         lines = [header]
         for t in tasks:
             proj = _task_project_name(t)
-            lines.append(f"{t.task_id} [{t.status}] ({proj})")
+            extra = f" phase={t.phase}" if t.phase else ""
+            tries = f" attempts={t.attempts}" if t.attempts else ""
+            lines.append(f"{t.task_id} [{t.status}] ({proj}){extra}{tries}")
         _send_message(chat_id, "\n".join(lines))
         return True
     if text.startswith("/current"):
@@ -571,7 +758,8 @@ def _handle_command(
         if hint:
             lines.append(f"Server hint: {hint}")
         if last_task:
-            lines.append(f"Last task: {last_task.task_id} [{last_task.status}]")
+            suffix = f" phase={last_task.phase}" if last_task.phase else ""
+            lines.append(f"Last task: {last_task.task_id} [{last_task.status}]{suffix}")
         else:
             lines.append("Last task: (none)")
         _send_message(chat_id, "\n".join(lines))
@@ -1071,6 +1259,23 @@ class TaskWatchdog:
             time.sleep(30)
 
 
+def _send_phase_update(chat_id: int, task, include_plan: bool = False) -> None:
+    lines = [_phase_text(task)]
+    if include_plan and task.plan:
+        lines.append("Plan:")
+        lines.extend(f"- {item}" for item in task.plan[:6])
+    _send_message(chat_id, "\n".join(lines))
+
+
+def _append_log_block(log_path: Path, title: str, text: str) -> None:
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"\n[{title}]\n")
+            log_file.write(text.rstrip() + "\n")
+    except Exception as exc:
+        _log(f"failed to write {title} block for {log_path.name}: {exc!r}")
+
+
 def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) -> None:
     if not is_path_allowed(task.workdir, allowed_roots):
         task.status = "blocked"
@@ -1080,6 +1285,7 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
         return
 
     task.status = "running"
+    task.phase = "preparing"
     store.update_task(task)
     _send_action(chat_id, "typing")
 
@@ -1097,8 +1303,11 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
     projects = _list_projects(settings.project_root)
     preamble = _project_preamble(projects, task.workdir)
     docs = _project_docs_context(task.workdir)
+    snapshot = _project_snapshot_context(task.workdir)
+    git_ctx = _git_context(task.workdir)
     project_name = _project_name_for_path(task.workdir)
     memory = _memory_context(project_name, chat_id, settings.project_memory_context_lines)
+    recent_tasks = _recent_task_context(store, chat_id, task.workdir)
     text_lower = (task.text or "").lower()
     wants_ios = any(key in text_lower for key in ("ios", "iphone", "ipad", "simulator", "模拟器", "苹果"))
     wants_web = any(key in text_lower for key in ("web", "chrome"))
@@ -1106,11 +1315,18 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
     if ("flutter" in text_lower) and not (wants_ios or wants_web or wants_android):
         wants_ios = True
     needs_flutter = ("flutter" in text_lower) or wants_ios
-    sections = [preamble]
+    base_sections = [preamble, _execution_style_context()]
+    sections = list(base_sections)
     if docs:
         sections.append(docs)
+    if snapshot:
+        sections.append(snapshot)
+    if git_ctx:
+        sections.append(git_ctx)
     if memory:
         sections.append(memory)
+    if recent_tasks:
+        sections.append(recent_tasks)
     if needs_flutter:
         sections.append(
             "Flutter note: SDK is already installed and writable. Do NOT propose copying the SDK. "
@@ -1128,26 +1344,72 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
         "Automation policy: inside the current workdir, proceed end-to-end without asking for confirmation for normal development work. "
         "Only pause for clearly destructive actions such as deleting real data, resetting git history, or operating outside the allowed project roots."
     )
-    sections.append(f"User request:\n{task.text}")
-    task_prompt = "\n\n".join(sections)
+    sections.append(
+        "Output contract:\n"
+        "- Do the work when possible, not just analysis.\n"
+        "- Mention key files changed and key commands run.\n"
+        "- If something fails, say exactly what failed and what you tried.\n"
+    )
 
     def _set_pid(pid: int) -> None:
         task.pid = pid
         store.update_task(task)
 
     provider = store.get_chat_provider(chat_id) or settings.provider_default or "codex"
-    output, error = run_codex(
-        settings,
-        task_prompt,
-        task.workdir,
-        log_path=log_path,
-        needs_flutter=needs_flutter,
-        on_pid=_set_pid,
-        provider=provider,
-    )
-    if error:
+    if _should_auto_plan(task.text, task.workdir):
+        task.phase = "planning"
+        store.update_task(task)
+        plan = _plan_task(
+            task,
+            store,
+            provider,
+            needs_flutter,
+            base_sections + sections[2:],
+            log_path,
+        )
+        if plan:
+            _append_log_block(log_path, "plan", "\n".join(f"- {item}" for item in plan))
+            _send_phase_update(chat_id, task, include_plan=True)
+
+    attempts_allowed = 1 + max(0, settings.auto_retry_attempts if settings.auto_retry_on_failure else 0)
+    output = None
+    error = None
+    for attempt in range(1, attempts_allowed + 1):
+        task.attempts = attempt
+        task.phase = "executing" if attempt == 1 else "retrying"
+        store.update_task(task)
+        if attempt > 1:
+            _send_phase_update(chat_id, task, include_plan=False)
+        attempt_sections = list(sections)
+        if task.plan:
+            attempt_sections.append("Execution plan:\n" + "\n".join(f"{i+1}. {item}" for i, item in enumerate(task.plan)))
+        if attempt > 1:
+            retry_context = [
+                "Retry instruction:",
+                "- The previous attempt failed. Inspect the failure, fix the root cause, and retry end-to-end.",
+            ]
+            if error:
+                retry_context.append("Previous error:\n" + error)
+            tail = _tail_log(log_path, 80)
+            if tail:
+                retry_context.append("Recent log tail:\n" + tail)
+            attempt_sections.append("\n".join(retry_context))
+        attempt_sections.append(f"User request:\n{task.text}")
+        task_prompt = "\n\n".join(attempt_sections)
+        output, error = run_codex(
+            settings,
+            task_prompt,
+            task.workdir,
+            log_path=log_path,
+            needs_flutter=needs_flutter,
+            on_pid=_set_pid,
+            provider=provider,
+        )
+        if not error:
+            break
         if _needs_codex_approval(error):
             task.status = "needs_approval"
+            task.phase = "awaiting_approval"
             task.error = error
             store.update_task(task)
             _send_message(
@@ -1155,7 +1417,12 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
                 f"Codex approval required for task {task.task_id}. Reply /approve {task.task_id} or /reject {task.task_id}",
             )
             return
+        if attempt < attempts_allowed:
+            _append_log_block(log_path, f"retry-{attempt}", error)
+            continue
+    if error:
         task.status = "failed"
+        task.phase = "failed"
         task.error = error
         store.update_task(task)
         _append_memory(chat_id, task, "failed", error)
@@ -1166,26 +1433,24 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
     if (_needs_ios_verbose_retry(wants_ios, output) or _log_has_ios_launch_error(log_path)) and not _log_has_diagnostics(log_path):
         diag = _run_flutter_verbose_diag(task.workdir)
         task.status = "failed"
+        task.phase = "failed"
         task.error = "iOS launch failed. See diagnostics."
         task.output = (output or "") + "\n\nDiagnostics:\n" + diag
         store.update_task(task)
         _append_memory(chat_id, task, "failed", task.output or "")
-        try:
-            with log_path.open("a", encoding="utf-8") as log_file:
-                log_file.write("\n[diagnostics]\n")
-                log_file.write(task.output or "")
-                log_file.write("\n")
-        except Exception as exc:
-            _log(f"failed to write diagnostics for {task.task_id}: {exc!r}")
+        _append_log_block(log_path, "diagnostics", task.output or "")
         _send_message(chat_id, task.output)
         return
 
+    task.phase = "verifying"
+    store.update_task(task)
     verify_ok, verify_summary = _run_verification(task.workdir, task.text, log_path)
     final_output = output or "(no output)"
     if verify_summary:
         final_output = final_output.rstrip() + "\n\n" + verify_summary
 
     task.status = "done" if verify_ok else "done_with_issues"
+    task.phase = "completed" if verify_ok else "completed_with_issues"
     task.output = final_output
     store.update_task(task)
     _append_memory(chat_id, task, task.status, task.output or "")

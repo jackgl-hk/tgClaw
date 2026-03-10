@@ -19,6 +19,8 @@ Key behaviors:
 - Flutter + emulators can be used on the host; `flutter run` should be executed in the current project folder when requested.
 - Common Flutter commands supported: `flutter pub get`, `flutter analyze`, `flutter run`, `flutter test`, `flutter build`, `flutter clean`.
 - After code tasks, the bot runs basic automatic verification when it can detect the project type. For Flutter this includes `flutter pub get` and `flutter analyze`.
+- For non-trivial code tasks, the bot first generates a short execution plan, then executes, then verifies.
+- If execution fails, the bot can do one automatic repair retry with the previous error and log tail as context.
 - Use `/cancel <id>` to stop a running task.
 - The bot auto-loads key Markdown files from the project folder into the prompt (includes `service/README.md` and `docs/DEPLOYMENT*.md` when present).
 - If a task mentions Flutter, the bot automatically adds the Flutter SDK directory to the Codex sandbox (override with `FLUTTER_SDK_PATH`).
@@ -35,6 +37,7 @@ How it works:
 - Output is captured to a log file; the bot replies with status and lets you fetch logs.
 - If a task requests approval (destructive actions), the bot pauses and waits for `/approve` or `/reject`.
 - Successful code tasks include an automatic verification summary in the reply and the task log.
+- `/status` and `/tasks` include task phase and attempt count so you can see whether a task is planning, executing, retrying, or verifying.
 
 Entry / wake-up:
 - The entry point is the Telegram chat itself.

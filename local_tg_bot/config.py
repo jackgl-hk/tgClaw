@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+if _ENV_PATH.exists():
+    load_dotenv(_ENV_PATH)
 
 
 def _get_int(name: str, default: int) -> int:
@@ -42,6 +50,24 @@ def _parse_map(raw: str | None) -> dict[str, str]:
     return items
 
 
+def _first_nonempty(*values: str | None, default: str = "") -> str:
+    for value in values:
+        if value and value.strip():
+            return value.strip()
+    return default
+
+
+def _derive_project_root() -> str:
+    allowed = os.getenv("ALLOWED_ROOTS", "")
+    allowed_first = allowed.split(",")[0].strip() if allowed else ""
+    return _first_nonempty(
+        os.getenv("PROJECT_ROOT"),
+        os.getenv("DEFAULT_WORKDIR"),
+        allowed_first,
+        default="/path/to/projects",
+    )
+
+
 @dataclass
 class Settings:
     telegram_bot_token: str | None = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -53,21 +79,29 @@ class Settings:
     telegram_allowed_chat_ids: str | None = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")
     telegram_message_max_chars: int = _get_int("TELEGRAM_MESSAGE_MAX_CHARS", 3500)
 
-    allowed_roots: str = os.getenv("ALLOWED_ROOTS", "/path/to/projects")
-    default_workdir: str = os.getenv("DEFAULT_WORKDIR", "/path/to/projects")
-    project_root: str = os.getenv("PROJECT_ROOT", "/path/to/projects")
+    allowed_roots: str = _first_nonempty(os.getenv("ALLOWED_ROOTS"), default="/path/to/projects")
+    default_workdir: str = _first_nonempty(
+        os.getenv("DEFAULT_WORKDIR"),
+        os.getenv("PROJECT_ROOT"),
+        os.getenv("ALLOWED_ROOTS", "").split(",")[0] if os.getenv("ALLOWED_ROOTS") else None,
+        default="/path/to/projects",
+    )
+    project_root: str = _derive_project_root()
     project_memory_dir: str = os.getenv("PROJECT_MEMORY_DIR", "data/memory")
     project_memory_max_lines: int = _get_int("PROJECT_MEMORY_MAX_LINES", 600)
     project_memory_context_lines: int = _get_int("PROJECT_MEMORY_CONTEXT_LINES", 80)
     project_context_files: str = os.getenv(
         "PROJECT_CONTEXT_FILES",
-        "AGENTS.md,README.md,readme.md,TASK.md,task.md,PRD.md,prd.md,DESIGN.md,design.md,STATUS.md,service/README.md,service/readme.md,server/README.md,server/readme.md,docs/README.md,docs/OVERVIEW.md,docs/overview.md,docs/DEPLOYMENT.md,docs/DEPLOYMENT_MAC_MINI.md,DEPLOYMENT.md",
+        "AGENTS.md,agents.md,README.md,readme.md,TASK.md,task.md,PRD.md,prd.md,DESIGN.md,design.md,STATUS.md,status.md,service/README.md,service/readme.md,server/README.md,server/readme.md,docs/README.md,docs/readme.md,docs/OVERVIEW.md,docs/overview.md,docs/DEPLOYMENT.md,docs/DEPLOYMENT_MAC_MINI.md,DEPLOYMENT.md",
     )
     project_context_max_chars: int = _get_int("PROJECT_CONTEXT_MAX_CHARS", 6000)
     flutter_sdk_path: str | None = os.getenv("FLUTTER_SDK_PATH")
     flutter_auto_add_dir: bool = os.getenv("FLUTTER_AUTO_ADD_DIR", "1") == "1"
     auto_verify: bool = os.getenv("AUTO_VERIFY", "1") == "1"
     auto_verify_timeout_sec: int = _get_int("AUTO_VERIFY_TIMEOUT_SEC", 300)
+    auto_plan: bool = os.getenv("AUTO_PLAN", "1") == "1"
+    auto_retry_attempts: int = _get_int("AUTO_RETRY_ATTEMPTS", 1)
+    auto_retry_on_failure: bool = os.getenv("AUTO_RETRY_ON_FAILURE", "1") == "1"
 
     codex_task_command: str | None = os.getenv("CODEX_TASK_COMMAND")
     codex_task_args: str | None = os.getenv("CODEX_TASK_ARGS")

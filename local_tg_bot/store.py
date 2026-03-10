@@ -19,6 +19,9 @@ class Task:
     pid: int | None = None
     output: str | None = None
     error: str | None = None
+    phase: str | None = None
+    plan: list[str] | None = None
+    attempts: int = 0
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -33,6 +36,9 @@ class Task:
             "pid": self.pid,
             "output": self.output,
             "error": self.error,
+            "phase": self.phase,
+            "plan": self.plan,
+            "attempts": self.attempts,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -49,6 +55,9 @@ class Task:
             pid=data.get("pid"),
             output=data.get("output"),
             error=data.get("error"),
+            phase=data.get("phase"),
+            plan=data.get("plan"),
+            attempts=int(data.get("attempts", 0)),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
@@ -93,6 +102,9 @@ class TaskStore:
             workdir=workdir,
             status="pending",
             requires_approval=requires_approval,
+            phase="queued",
+            plan=[],
+            attempts=0,
             created_at=_now(),
             updated_at=_now(),
         )
