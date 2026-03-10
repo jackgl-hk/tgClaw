@@ -66,6 +66,8 @@ class Settings:
     project_context_max_chars: int = _get_int("PROJECT_CONTEXT_MAX_CHARS", 6000)
     flutter_sdk_path: str | None = os.getenv("FLUTTER_SDK_PATH")
     flutter_auto_add_dir: bool = os.getenv("FLUTTER_AUTO_ADD_DIR", "1") == "1"
+    auto_verify: bool = os.getenv("AUTO_VERIFY", "1") == "1"
+    auto_verify_timeout_sec: int = _get_int("AUTO_VERIFY_TIMEOUT_SEC", 300)
 
     codex_task_command: str | None = os.getenv("CODEX_TASK_COMMAND")
     codex_task_args: str | None = os.getenv("CODEX_TASK_ARGS")

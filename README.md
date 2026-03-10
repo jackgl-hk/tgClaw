@@ -5,7 +5,8 @@ A local Telegram bot that lets you trigger Codex (or another LLM CLI) tasks on y
 Key behaviors:
 - Only operates inside your configured project root (see `.env`).
 - Creating new files is allowed without asking.
-- Destructive actions require approval via Telegram.
+- Routine development work inside the current workdir runs without asking.
+- Clearly destructive actions still require approval via Telegram.
 - No streaming; tasks are queued and you get a task id immediately.
 - On failure, it runs a quick self-check (Codex + Node) and includes diagnostics.
 - If Codex emits an approval prompt, the bot will forward it and wait for /approve or /reject.
@@ -17,6 +18,7 @@ Key behaviors:
 - Use `/provider <name>` (alias `/model`) to switch CLI provider per chat.
 - Flutter + emulators can be used on the host; `flutter run` should be executed in the current project folder when requested.
 - Common Flutter commands supported: `flutter pub get`, `flutter analyze`, `flutter run`, `flutter test`, `flutter build`, `flutter clean`.
+- After code tasks, the bot runs basic automatic verification when it can detect the project type. For Flutter this includes `flutter pub get` and `flutter analyze`.
 - Use `/cancel <id>` to stop a running task.
 - The bot auto-loads key Markdown files from the project folder into the prompt (includes `service/README.md` and `docs/DEPLOYMENT*.md` when present).
 - If a task mentions Flutter, the bot automatically adds the Flutter SDK directory to the Codex sandbox (override with `FLUTTER_SDK_PATH`).
@@ -32,6 +34,7 @@ How it works:
 - Otherwise it is treated as a task and sent to your CLI via `CODEX_TASK_COMMAND` (default `codex`).
 - Output is captured to a log file; the bot replies with status and lets you fetch logs.
 - If a task requests approval (destructive actions), the bot pauses and waits for `/approve` or `/reject`.
+- Successful code tasks include an automatic verification summary in the reply and the task log.
 
 Entry / wake-up:
 - The entry point is the Telegram chat itself.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import sys
 import threading
@@ -10,6 +11,7 @@ import os
 import re
 import signal
 from datetime import datetime, timedelta
+from shutil import which
 from urllib.parse import urlparse
 
 from .config import settings
@@ -127,6 +129,8 @@ def _project_preamble(projects: list[str], workdir: str) -> str:
         f"- Current project: {project_name or workdir}",
         "- If the request mentions a project name, focus on that folder. Otherwise use the current project.",
         "- Flutter is installed locally and emulators are available. If the user asks to run Flutter, run it in the current project folder.",
+        "- Inside the current workdir, make reasonable development changes directly without asking for confirmation unless the action is clearly destructive.",
+        "- After code changes, run the project's basic verification commands when feasible and report the result.",
     ]
     if project_name:
         summary, hint = _project_info(settings.project_root, project_name)
@@ -410,7 +414,7 @@ def _handle_command(
             "/switch <project> | /leave | /current | /status [id] | "
             "/tasks [project|all] | /log <id> [lines] | /selfcheck | /approve <id> | /reject <id> | "
             "/cancel <id> | /reset\n"
-            "Notes: Flutter commands (flutter run/pub get/analyze/test/build/clean) run in current project.",
+            "Notes: workdir tasks are auto-executed unless clearly destructive. Basic verification runs automatically for code tasks.",
         )
         return True
     if text.startswith("/reset"):
@@ -692,6 +696,178 @@ def _prepare_env(workdir: str) -> dict:
     return env
 
 
+def _is_docs_only_task(text: str) -> bool:
+    lower = (text or "").lower()
+    if any(token in lower for token in ("flutter", "dart", "build", "run", "test", "analyze", "fix", "bug")):
+        return False
+    docs_tokens = ("readme", ".md", "markdown", "docs", "documentation", "translate", "summarize", "summary")
+    return any(token in lower for token in docs_tokens)
+
+
+def _is_code_task(text: str, workdir: str) -> bool:
+    if _is_docs_only_task(text):
+        return False
+    lower = (text or "").lower()
+    triggers = (
+        "fix",
+        "bug",
+        "implement",
+        "create",
+        "build",
+        "run",
+        "test",
+        "analyze",
+        "refactor",
+        "screen",
+        "page",
+        "api",
+        "flutter",
+        "dart",
+        "react",
+        "ios",
+        "android",
+    )
+    if any(token in lower for token in triggers):
+        return True
+    base = Path(workdir)
+    return any(
+        (base / marker).exists()
+        for marker in ("pubspec.yaml", "package.json", "pyproject.toml", "requirements.txt")
+    )
+
+
+def _detect_package_manager(workdir: str) -> str:
+    base = Path(workdir)
+    if (base / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (base / "yarn.lock").exists():
+        return "yarn"
+    return "npm"
+
+
+def _load_package_scripts(workdir: str) -> dict[str, str]:
+    path = Path(workdir) / "package.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    scripts = data.get("scripts")
+    if not isinstance(scripts, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, value in scripts.items():
+        if isinstance(key, str) and isinstance(value, str):
+            result[key] = value
+    return result
+
+
+def _verification_plan(workdir: str, text: str) -> list[tuple[str, list[str]]]:
+    if not settings.auto_verify or not _is_code_task(text, workdir):
+        return []
+
+    base = Path(workdir)
+    steps: list[tuple[str, list[str]]] = []
+
+    if (base / "pubspec.yaml").exists():
+        flutter = _flutter_bin(workdir)
+        steps.append(("flutter pub get", [flutter, "pub", "get"]))
+        steps.append(("flutter analyze", [flutter, "analyze"]))
+        return steps
+
+    scripts = _load_package_scripts(workdir)
+    package_manager = _detect_package_manager(workdir)
+    if package_manager == "pnpm":
+        runner = "pnpm"
+    elif package_manager == "yarn":
+        runner = "yarn"
+    else:
+        runner = "npm"
+
+    if scripts.get("lint"):
+        steps.append((f"{runner} lint", [runner, "run", "lint"] if runner != "yarn" else [runner, "lint"]))
+    elif scripts.get("check"):
+        steps.append((f"{runner} check", [runner, "run", "check"] if runner != "yarn" else [runner, "check"]))
+
+    if scripts.get("typecheck"):
+        steps.append(
+            (f"{runner} typecheck", [runner, "run", "typecheck"] if runner != "yarn" else [runner, "typecheck"])
+        )
+
+    if not steps and scripts.get("test"):
+        if any(token in (text or "").lower() for token in ("test", "fix", "bug", "implement")):
+            steps.append((f"{runner} test", [runner, "run", "test"] if runner != "yarn" else [runner, "test"]))
+
+    if steps:
+        return steps[:2]
+
+    if (
+        ((base / "pyproject.toml").exists() or (base / "pytest.ini").exists() or (base / "tests").exists())
+        and which("pytest", path=_prepare_env(workdir).get("PATH", ""))
+    ):
+        return [("pytest -q", ["pytest", "-q"])]
+
+    return []
+
+
+def _trim_command_output(text: str, max_lines: int = 80) -> str:
+    lines = (text or "").splitlines()
+    if len(lines) <= max_lines:
+        return "\n".join(lines).strip()
+    return "\n".join(lines[-max_lines:]).strip()
+
+
+def _run_verification(workdir: str, task_text: str, log_path: Path) -> tuple[bool, str]:
+    steps = _verification_plan(workdir, task_text)
+    if not steps:
+        return True, "No automatic verification steps matched this task."
+
+    env = _prepare_env(workdir)
+    results: list[str] = []
+    all_ok = True
+
+    for label, command in steps:
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=workdir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=settings.auto_verify_timeout_sec,
+            )
+            combined = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        except subprocess.TimeoutExpired:
+            all_ok = False
+            combined = f"Timed out after {settings.auto_verify_timeout_sec}s."
+            proc = None
+        except Exception as exc:
+            all_ok = False
+            combined = f"Failed to start: {exc}"
+            proc = None
+
+        ok = proc is not None and proc.returncode == 0
+        if not ok:
+            all_ok = False
+        snippet = _trim_command_output(combined)
+        status = "PASS" if ok else "FAIL"
+        line = f"[{status}] {label}"
+        if snippet:
+            line += "\n" + snippet
+        results.append(line)
+
+    summary = "Verification:\n" + "\n\n".join(results)
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write("\n[verification]\n")
+            log_file.write(summary)
+            log_file.write("\n")
+    except Exception as exc:
+        _log(f"failed to write verification for log {log_path}: {exc!r}")
+    return all_ok, summary
+
+
 def _parse_ios_device_id(devices_output: str) -> str | None:
     for line in devices_output.splitlines():
         if "ios" not in line.lower() or "simulator" not in line.lower():
@@ -948,6 +1124,10 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
             "`flutter run -v -d <ios-device-id>` and capture full output to a log file, then show the tail. "
             "If CocoaPods is missing, report the error and stop."
         )
+    sections.append(
+        "Automation policy: inside the current workdir, proceed end-to-end without asking for confirmation for normal development work. "
+        "Only pause for clearly destructive actions such as deleting real data, resetting git history, or operating outside the allowed project roots."
+    )
     sections.append(f"User request:\n{task.text}")
     task_prompt = "\n\n".join(sections)
 
@@ -1000,10 +1180,15 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
         _send_message(chat_id, task.output)
         return
 
-    task.status = "done"
-    task.output = output or "(no output)"
+    verify_ok, verify_summary = _run_verification(task.workdir, task.text, log_path)
+    final_output = output or "(no output)"
+    if verify_summary:
+        final_output = final_output.rstrip() + "\n\n" + verify_summary
+
+    task.status = "done" if verify_ok else "done_with_issues"
+    task.output = final_output
     store.update_task(task)
-    _append_memory(chat_id, task, "done", task.output or "")
+    _append_memory(chat_id, task, task.status, task.output or "")
     _send_message(chat_id, task.output)
 
 

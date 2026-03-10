@@ -23,10 +23,12 @@ Project detection: if your message mentions a known project name, the bot switch
 Project memory: each completed task is appended to a per-project memory file. Switching/leave will save a memory marker and clear the active project.
 Flutter: the host has Flutter + emulators installed; running `flutter run` should happen in the current project folder without extra prompts.
 Common Flutter commands supported: `flutter pub get`, `flutter analyze`, `flutter run`, `flutter test`, `flutter build`, `flutter clean`.
+Automation default: normal development work inside the active workdir should run without extra confirmation. Approval is mainly for destructive actions.
 Project docs: the bot auto-loads key Markdown files (like `AGENTS.md`, `README.md`, `task.md`, `service/README.md`, `docs/DEPLOYMENT*.md`) from the project folder and includes them in the Codex prompt.
 Flutter SDK: when a task mentions Flutter, the bot auto-allows the Flutter SDK directory in the Codex sandbox (configurable via `FLUTTER_SDK_PATH`).
 If Codex reports an approval prompt, the bot will ask you to `/approve` or `/reject`.
 If a task fails, the bot will include a short diagnostics block automatically.
+If a code task succeeds, the bot will also run basic automatic verification. Flutter projects run `flutter pub get` and `flutter analyze`; Node/Python projects run lightweight checks when a supported script or tool is detected.
 
 Provider selection:
 - Use `PROVIDER_COMMANDS` in `.env` to map provider names to CLI commands.
@@ -44,6 +46,7 @@ Codex path note:
 - The bot runs `codex exec` by default for non-interactive execution.
 - For parallel Codex runs, set `CODEX_MAX_WORKERS` (default 1).
 - Stale running tasks are auto-failed after `TASK_STALE_SEC` (0 = `CODEX_TIMEOUT_SEC + 60`; if both are 0, watchdog is disabled).
+- Automatic verification is controlled by `AUTO_VERIFY` and `AUTO_VERIFY_TIMEOUT_SEC`.
 
 Telegram connectivity note:
 - If the bot cannot reach Telegram (common on restricted networks), set `TELEGRAM_PROXY` to a reachable HTTPS proxy URL.
