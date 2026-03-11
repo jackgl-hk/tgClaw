@@ -24,6 +24,7 @@ class Task:
     attempts: int = 0
     current_step: int = 0
     total_steps: int = 0
+    needs_input_prompt: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -43,6 +44,7 @@ class Task:
             "attempts": self.attempts,
             "current_step": self.current_step,
             "total_steps": self.total_steps,
+            "needs_input_prompt": self.needs_input_prompt,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -64,6 +66,7 @@ class Task:
             attempts=int(data.get("attempts", 0)),
             current_step=int(data.get("current_step", 0)),
             total_steps=int(data.get("total_steps", 0)),
+            needs_input_prompt=data.get("needs_input_prompt"),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
@@ -113,6 +116,7 @@ class TaskStore:
             attempts=0,
             current_step=0,
             total_steps=0,
+            needs_input_prompt=None,
             created_at=_now(),
             updated_at=_now(),
         )

@@ -109,3 +109,12 @@ def _post_with_curl(
         return None
     _log(f"{reason} curl ok=true")
     return data
+
+
+def inline_keyboard(rows: list[list[tuple[str, str]]]) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": label, "callback_data": data} for label, data in row]
+            for row in rows
+        ]
+    }

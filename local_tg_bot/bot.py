@@ -18,7 +18,7 @@ from .config import settings
 from .policy import parse_allowed_roots, is_path_allowed, needs_delete_approval
 from .runner import run_codex, diagnose_codex, _ensure_path, _add_project_flutter_to_path
 from .store import TaskStore
-from .telegram import post, split_text, set_force_curl
+from .telegram import inline_keyboard, post, split_text, set_force_curl
 
 
 def _now_id() -> str:
@@ -728,6 +728,54 @@ def _phase_text(task) -> str:
     return " | ".join(parts)
 
 
+def _approval_card_text(task) -> str:
+    lines = [
+        "Approval required",
+        f"Task: `{task.task_id}`",
+        f"Project: `{_task_project_name(task)}`",
+        f"Phase: `{task.phase or 'n/a'}`",
+        "",
+        "Reason:",
+        _safe_summary(task.error or task.text, 500) or "(no detail)",
+    ]
+    return "\n".join(lines)
+
+
+def _input_card_text(task) -> str:
+    lines = [
+        "Need more input",
+        f"Task: `{task.task_id}`",
+        f"Project: `{_task_project_name(task)}`",
+        "",
+        "Question:",
+        _safe_summary(task.needs_input_prompt or task.error or "", 700) or "(no detail)",
+        "",
+        f"Reply with: `/reply {task.task_id} <your answer>`",
+    ]
+    return "\n".join(lines)
+
+
+def _send_approval_card(chat_id: int, task) -> None:
+    _send_message_card(
+        chat_id,
+        _approval_card_text(task),
+        [
+            [("Approve", f"approve:{task.task_id}"), ("Reject", f"reject:{task.task_id}")],
+            [("Status", f"status:{task.task_id}"), ("Log", f"log:{task.task_id}")],
+        ],
+    )
+
+
+def _send_input_card(chat_id: int, task) -> None:
+    _send_message_card(
+        chat_id,
+        _input_card_text(task),
+        [
+            [("Status", f"status:{task.task_id}"), ("Cancel", f"cancel:{task.task_id}")],
+        ],
+    )
+
+
 def _should_subtask_execute(task, workdir: str) -> bool:
     return bool(
         settings.auto_subtasks
@@ -737,12 +785,53 @@ def _should_subtask_execute(task, workdir: str) -> bool:
     )
 
 
+def _needs_user_input(output: str | None) -> bool:
+    text = (output or "").strip().lower()
+    if not text:
+        return False
+    triggers = [
+        "i need to know",
+        "please tell me",
+        "which project",
+        "which file",
+        "which path",
+        "which directory",
+        "what project",
+        "what path",
+        "what file",
+        "can you clarify",
+        "need more information",
+        "please provide",
+    ]
+    if any(trigger in text for trigger in triggers):
+        return True
+    return text.endswith("?") and len(text.splitlines()) <= 8
+
+
 def _send_message(chat_id: int, text: str) -> None:
     for chunk in split_text(text, settings.telegram_message_max_chars):
         payload = {"chat_id": chat_id, "text": chunk}
         resp = post(_base_url(), "/sendMessage", payload, proxy=settings.telegram_proxy)
         if not resp:
             _log(f"sendMessage failed for chat_id={chat_id}")
+
+
+def _send_message_card(chat_id: int, text: str, rows: list[list[tuple[str, str]]]) -> None:
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": inline_keyboard(rows),
+    }
+    resp = post(_base_url(), "/sendMessage", payload, proxy=settings.telegram_proxy)
+    if not resp:
+        _log(f"sendMessage card failed for chat_id={chat_id}")
+
+
+def _answer_callback(callback_id: str, text: str = "") -> None:
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    post(_base_url(), "/answerCallbackQuery", payload, proxy=settings.telegram_proxy)
 
 
 def _send_action(chat_id: int, action: str = "typing") -> None:
@@ -768,7 +857,7 @@ def _handle_command(
             "Local TG bot ready.\n"
             "Commands: /workdir <path> | /projects | /providers | /provider <name> | /model <name> | "
             "/switch <project> | /leave | /current | /status [id] | "
-            "/tasks [project|all] | /log <id> [lines] | /selfcheck | /approve <id> | /reject <id> | "
+            "/tasks [project|all] | /log <id> [lines] | /selfcheck | /approve <id> | /reject <id> | /reply <id> <text> | "
             "/cancel <id> | /reset\n"
             "Notes: workdir tasks are auto-executed unless clearly destructive. Basic verification runs automatically for code tasks.",
         )
@@ -970,7 +1059,28 @@ def _handle_command(
             return True
         task.status = "queued"
         store.update_task(task)
+        task.needs_input_prompt = None
         _send_message(chat_id, f"Approved. Task queued: {task.task_id}")
+        runner.enqueue(task.task_id, chat_id)
+        return True
+    if text.startswith("/reply "):
+        parts = text.split(" ", 2)
+        if len(parts) < 3:
+            _send_message(chat_id, "Usage: /reply <task_id> <your answer>")
+            return True
+        task_id = parts[1].strip()
+        reply_text = parts[2].strip()
+        task = store.get_task(task_id)
+        if not task:
+            _send_message(chat_id, "Task not found.")
+            return True
+        task.text = task.text.rstrip() + f"\n\nUser clarification:\n{reply_text}"
+        task.status = "queued"
+        task.phase = "clarified"
+        task.needs_input_prompt = None
+        task.error = None
+        store.update_task(task)
+        _send_message(chat_id, f"Reply attached. Task queued: {task.task_id}")
         runner.enqueue(task.task_id, chat_id)
         return True
     if text.startswith("/cancel "):
@@ -1000,6 +1110,7 @@ def _handle_command(
             _send_message(chat_id, "Task not found.")
             return True
         task.status = "rejected"
+        task.phase = "rejected"
         store.update_task(task)
         _send_message(chat_id, f"Task {task_id} rejected.")
         return True
@@ -1453,6 +1564,74 @@ def _append_log_block(log_path: Path, title: str, text: str) -> None:
         _log(f"failed to write {title} block for {log_path.name}: {exc!r}")
 
 
+def _handle_callback(
+    callback_id: str,
+    chat_id: int,
+    data: str,
+    store: TaskStore,
+    runner: "TaskRunner",
+) -> bool:
+    action, _, task_id = data.partition(":")
+    if not action or not task_id:
+        _answer_callback(callback_id, "Unsupported action")
+        return False
+    task = store.get_task(task_id)
+    if not task:
+        _answer_callback(callback_id, "Task not found")
+        return True
+    if action == "approve":
+        if task.status != "needs_approval":
+            _answer_callback(callback_id, f"Task is {task.status}")
+            return True
+        task.status = "queued"
+        task.phase = "approved"
+        task.needs_input_prompt = None
+        store.update_task(task)
+        runner.enqueue(task.task_id, chat_id)
+        _answer_callback(callback_id, "Approved")
+        _send_message(chat_id, f"Approved. Task queued: {task.task_id}")
+        return True
+    if action == "reject":
+        task.status = "rejected"
+        task.phase = "rejected"
+        store.update_task(task)
+        _answer_callback(callback_id, "Rejected")
+        _send_message(chat_id, f"Task {task.task_id} rejected.")
+        return True
+    if action == "cancel":
+        if task.pid:
+            try:
+                os.kill(task.pid, signal.SIGTERM)
+            except Exception as exc:
+                _log(f"Failed to kill pid {task.pid}: {exc!r}")
+        task.status = "cancelled"
+        task.phase = "cancelled"
+        task.error = "Cancelled by user."
+        task.pid = None
+        store.update_task(task)
+        _answer_callback(callback_id, "Cancelled")
+        _send_message(chat_id, f"Task {task.task_id} cancelled.")
+        return True
+    if action == "status":
+        _answer_callback(callback_id, "Status sent")
+        lines = [_phase_text(task)]
+        if task.plan:
+            lines.append("Plan:")
+            lines.extend(f"- {item}" for item in task.plan[:6])
+        if task.needs_input_prompt:
+            lines.append("Pending input:")
+            lines.append(task.needs_input_prompt)
+        _send_message(chat_id, "\n".join(lines))
+        return True
+    if action == "log":
+        _answer_callback(callback_id, "Log sent")
+        tail = _tail_log(_task_log_path(task.task_id), 20)
+        _send_message(chat_id, f"Log tail (20 lines):\n{tail}")
+        return True
+    _answer_callback(callback_id, "Unsupported action")
+    return False
+
+
 def _build_retry_context(log_path: Path, error: str | None) -> str:
     retry_context = [
         "Retry instruction:",
@@ -1600,10 +1779,7 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
                 task.phase = "awaiting_approval"
                 task.error = local_error
                 store.update_task(task)
-                _send_message(
-                    chat_id,
-                    f"Codex approval required for task {task.task_id}. Reply /approve {task.task_id} or /reject {task.task_id}",
-                )
+                _send_approval_card(chat_id, task)
                 return None, local_error
             if attempt < attempts_allowed:
                 _append_log_block(log_path, f"retry-{phase}-{attempt}", local_error)
@@ -1656,6 +1832,17 @@ def _run_task(chat_id: int, task, store: TaskStore, allowed_roots: list[str]) ->
         _update_status_doc(task, error)
         diag = diagnose_codex(settings)
         _send_message(chat_id, f"Task failed: {error}\n\nDiagnostics:\n{diag}")
+        return
+
+    if _needs_user_input(output):
+        task.status = "needs_input"
+        task.phase = "awaiting_input"
+        task.needs_input_prompt = (output or "").strip()
+        task.output = output
+        store.update_task(task)
+        _update_session_archive(chat_id, task, output or "")
+        _update_status_doc(task, output or "")
+        _send_input_card(chat_id, task)
         return
 
     if (_needs_ios_verbose_retry(wants_ios, output) or _log_has_ios_launch_error(log_path)) and not _log_has_diagnostics(log_path):
@@ -1748,6 +1935,19 @@ def run_bot() -> None:
                     offset = int(updates[-1]["update_id"]) + 1
                     _log(f"received {len(updates)} updates; last_id={offset-1}")
                 for update in updates:
+                    callback = update.get("callback_query")
+                    if callback:
+                        callback_id = callback.get("id")
+                        data = (callback.get("data") or "").strip()
+                        message = callback.get("message") or {}
+                        chat = message.get("chat") or {}
+                        chat_id = chat.get("id")
+                        if callback_id and chat_id is not None:
+                            if allowed_chat_ids and chat_id not in allowed_chat_ids:
+                                _answer_callback(callback_id, "Not allowed")
+                                continue
+                            _handle_callback(callback_id, chat_id, data, store, runner)
+                        continue
                     message = update.get("message") or update.get("edited_message")
                     if not message:
                         continue
@@ -1782,11 +1982,9 @@ def run_bot() -> None:
 
                     if requires_approval:
                         task.status = "needs_approval"
+                        task.phase = "awaiting_approval"
                         store.update_task(task)
-                        _send_message(
-                            chat_id,
-                            f"Approval required for task {task.task_id}. Reply /approve {task.task_id} or /reject {task.task_id}",
-                        )
+                        _send_approval_card(chat_id, task)
                         continue
                     task.status = "queued"
                     store.update_task(task)

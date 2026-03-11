@@ -25,6 +25,8 @@ Key behaviors:
 - If execution fails, the bot can do one automatic repair retry with the previous error and log tail as context.
 - The bot keeps a per-project session archive in `data/sessions/` so the next task can reuse the last plan and result summary.
 - After task completion, it can update the target project's `STATUS.md` automatically with the latest task, summary, plan, and verification result.
+- Approval requests are sent as Telegram button cards (`Approve`, `Reject`, `Status`, `Log`) instead of plain text only.
+- If the agent needs clarification, it marks the task as `needs_input` and sends a structured prompt card. Continue with `/reply <task_id> <answer>`.
 - Use `/cancel <id>` to stop a running task.
 - The bot auto-loads key Markdown files from the project folder into the prompt (includes `service/README.md` and `docs/DEPLOYMENT*.md` when present).
 - If a task mentions Flutter, the bot automatically adds the Flutter SDK directory to the Codex sandbox (override with `FLUTTER_SDK_PATH`).
